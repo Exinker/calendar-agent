@@ -1,6 +1,6 @@
 import json
+import logging
 import httpx
-from loguru import logger
 
 from src.models.config import settings
 from src.models.domain import ParsedEvent, ParsedEventsList
@@ -44,6 +44,9 @@ SYSTEM_PROMPT = """Ты помощник для извлечения инфор�
 - Если время не указано — ставь 10:00 по умолчанию"""
 
 
+logger = logging.getLogger(__name__)
+
+
 async def parse_events_with_llm(message: str) -> ParsedEventsList:
     """Parse events from natural language using LLM."""
     async with httpx.AsyncClient() as client:
@@ -71,7 +74,10 @@ async def parse_events_with_llm(message: str) -> ParsedEventsList:
                         },
                     }
                 ],
-                "tool_choice": {"type": "function", "function": {"name": "get_current_datetime"}},
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_current_datetime"},
+                },
                 "temperature": 0.1,
                 "max_tokens": 1000,
             },

@@ -1,11 +1,12 @@
 """Telegram bot handlers."""
+
 import asyncio
+import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.config import settings
@@ -20,10 +21,12 @@ from src.dao.database import AsyncSessionLocal
 # Initialize bot and dispatcher
 bot = Bot(token=settings.telegram_bot_token)
 dp = Dispatcher(storage=MemoryStorage())
+logger = logging.getLogger(__name__)
 
 
 class ClarificationState(StatesGroup):
     """State for waiting clarification from user."""
+
     waiting_for_answer = State()
 
 
@@ -37,29 +40,29 @@ async def get_db_session() -> AsyncSession:
 async def cmd_start(message: types.Message):
     """Handle /start command - check whitelist."""
     user_id = message.from_user.id
-    
+
     async with AsyncSessionLocal() as session:
         whitelist_mgr = WhitelistManager(session)
-        
+
         if not await whitelist_mgr.is_user_whitelisted(user_id):
             await message.answer(
                 "Доступ запрещен. Обратитесь к администратору для добавления в whitelist."
             )
             return
-        
+
         # Update last activity
         await whitelist_mgr.update_last_activity(user_id)
-        
+
         user = await whitelist_mgr.get_user(user_id)
         role_text = "администратор" if user.role == "admin" else "пользователь"
-        
+
         await message.answer(
             f"Привет! Вы {role_text} календарного бота.\n\n"
             f"Отправьте сообщение с описанием события, и я добавлю его в календарь.\n\n"
             f"Команды:\n"
             f"/stats - показать статистику\n"
         )
-        
+
         if user.role == "admin":
             await message.answer(
                 "Админские команды:\n"
@@ -73,32 +76,31 @@ async def cmd_start(message: types.Message):
 async def cmd_add_user(message: types.Message):
     """Add user to whitelist (admin only)."""
     admin_id = message.from_user.id
-    
+
     async with AsyncSessionLocal() as session:
         whitelist_mgr = WhitelistManager(session)
-        
+
         # Check if user is admin
         if not await whitelist_mgr.is_admin(admin_id):
             await message.answer("У вас нет прав для выполнения этой команды.")
             return
-        
+
         # Parse command arguments
         args = message.text.split()
         if len(args) < 2:
             await message.answer("Использование: /add_user <telegram_id>")
             return
-        
+
         try:
             new_user_id = int(args[1])
         except ValueError:
             await message.answer("Telegram ID должен быть числом.")
             return
-        
+
         # Add user to whitelist
         try:
             user = await whitelist_mgr.add_user(
-                telegram_id=new_user_id,
-                added_by=admin_id
+                telegram_id=new_user_id, added_by=admin_id
             )
             await message.answer(f"Пользователь {new_user_id} добавлен в whitelist.")
             logger.info(f"Admin {admin_id} added user {new_user_id}")
@@ -111,32 +113,32 @@ async def cmd_add_user(message: types.Message):
 async def cmd_remove_user(message: types.Message):
     """Remove user from whitelist (admin only)."""
     admin_id = message.from_user.id
-    
+
     async with AsyncSessionLocal() as session:
         whitelist_mgr = WhitelistManager(session)
-        
+
         # Check if user is admin
         if not await whitelist_mgr.is_admin(admin_id):
             await message.answer("У вас нет прав для выполнения этой команды.")
             return
-        
+
         # Parse command arguments
         args = message.text.split()
         if len(args) < 2:
             await message.answer("Использование: /remove_user <telegram_id>")
             return
-        
+
         try:
             user_id = int(args[1])
         except ValueError:
             await message.answer("Telegram ID должен быть числом.")
             return
-        
+
         # Prevent removing yourself
         if user_id == admin_id:
             await message.answer("Вы не можете удалить самого себя.")
             return
-        
+
         # Remove user
         try:
             success = await whitelist_mgr.remove_user(user_id)
@@ -154,21 +156,21 @@ async def cmd_remove_user(message: types.Message):
 async def cmd_list_users(message: types.Message):
     """List all whitelist users (admin only)."""
     admin_id = message.from_user.id
-    
+
     async with AsyncSessionLocal() as session:
         whitelist_mgr = WhitelistManager(session)
-        
+
         # Check if user is admin
         if not await whitelist_mgr.is_admin(admin_id):
             await message.answer("У вас нет прав для выполнения этой команды.")
             return
-        
+
         try:
             users = await whitelist_mgr.get_all_users(only_active=True)
             if not users:
                 await message.answer("Список пользователей пуст.")
                 return
-            
+
             text = "Пользователи в whitelist:\n\n"
             for user in users:
                 role_emoji = "👑" if user.role == "admin" else "👤"
@@ -176,7 +178,7 @@ async def cmd_list_users(message: types.Message):
                 if user.username:
                     text += f" (@{user.username})"
                 text += f" - {user.role}\n"
-            
+
             await message.answer(text)
         except Exception as e:
             logger.error(f"Failed to list users: {e}")
@@ -187,10 +189,10 @@ async def cmd_list_users(message: types.Message):
 async def cmd_stats(message: types.Message):
     """Show user statistics."""
     user_id = message.from_user.id
-    
+
     async with AsyncSessionLocal() as session:
         event_logger = EventLogger(session)
-        
+
         try:
             stats = await event_logger.get_user_stats(user_id)
             if stats:
@@ -215,72 +217,76 @@ async def handle_clarification(message: types.Message, state: FSMContext):
 
 
 async def process_message(
-    message: types.Message, 
-    state: FSMContext = None, 
-    override_title: str = None
+    message: types.Message, state: FSMContext = None, override_title: str = None
 ):
     """Process message and create calendar event."""
     user_id = message.from_user.id
-    
+
     async with AsyncSessionLocal() as session:
         # Check whitelist
         whitelist_mgr = WhitelistManager(session)
         if not await whitelist_mgr.is_user_whitelisted(user_id):
             # Ignore messages from non-whitelisted users
             return
-        
+
         await message.answer("Обрабатываю сообщение...")
-        
+
         try:
             # Parse events from message
             events_list = await parse_events_with_llm(message.text)
-            
+
             if not events_list.events:
-                await message.answer("Не удалось найти события в сообщении. Попробуйте ещё раз.")
+                await message.answer(
+                    "Не удалось найти события в сообщении. Попробуйте ещё раз."
+                )
                 return
-            
+
             # Get calendar manager
             calendar_mgr = CalendarManager(session)
             client = await calendar_mgr.get_calendar_client()
-            
+
             if not client:
-                await message.answer("Календарь не настроен. Обратитесь к администратору.")
+                await message.answer(
+                    "Календарь не настроен. Обратитесь к администратору."
+                )
                 return
-            
+
             # Create events
             created = []
             for event in events_list.events:
                 if event.needs_clarification:
                     await state.set_state(ClarificationState.waiting_for_answer)
                     await state.update_data(events=events_list.events)
-                    await message.answer(event.clarification_question or "Уточните детали события:")
+                    await message.answer(
+                        event.clarification_question or "Уточните детали события:"
+                    )
                     return
-                
+
                 if override_title:
                     event.title = override_title
-                
+
                 # Create event in calendar
                 client.create_event(event)
                 created.append(event)
-                
+
                 # Log event
                 event_logger = EventLogger(session)
                 from datetime import datetime
+
                 event_datetime = datetime.strptime(
-                    f"{event.start_date} {event.start_time}", 
-                    "%Y-%m-%d %H:%M"
+                    f"{event.start_date} {event.start_time}", "%Y-%m-%d %H:%M"
                 )
                 await event_logger.log_event(
                     telegram_user_id=user_id,
                     event_title=event.title,
                     event_date=event_datetime,
                     calendar_type="yandex",  # TODO: Get from config
-                    event_description=event.description
+                    event_description=event.description,
                 )
-            
+
             # Update user activity
             await whitelist_mgr.update_last_activity(user_id)
-            
+
             # Send success message
             if len(created) == 1:
                 result = (
@@ -293,10 +299,12 @@ async def process_message(
             else:
                 result = f"✅ Добавлено {len(created)} событий:\n\n"
                 for i, event in enumerate(created, 1):
-                    result += f"{i}. {event.title} — {event.start_date} {event.start_time}\n"
-            
+                    result += (
+                        f"{i}. {event.title} — {event.start_date} {event.start_time}\n"
+                    )
+
             await message.answer(result)
-            
+
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             await message.answer(f"❌ Ошибка: {str(e)}")
