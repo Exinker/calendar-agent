@@ -1,111 +1,91 @@
-# Calendar Agent - AGENTS.md
+# Calendar Bot - AGENTS.md
 
-## Project Overview
-Multi-user Telegram bot with whitelist that parses Russian natural language messages and adds events to shared Yandex/iCloud calendars via CalDAV. Only whitelisted users can add events.
+Multi-user Telegram bot with whitelist for adding events to shared Yandex/iCloud calendars via CalDAV.
 
-## Tech Stack
-- **Python 3.12**
-- **uv** - Python package manager and virtual environment
-- **aiogram** - Telegram bot framework
-- **PostgreSQL** - Persistent storage for whitelist and event logs
-- **SQLAlchemy + Alembic** - ORM and database migrations
-- **psycopg** - PostgreSQL driver
-- **cryptography** - Encryption for calendar credentials
-- **pydantic-settings** - Configuration via `.env`
-- **OpenRouter** - LLM provider for message parsing
-- **caldav** - Calendar integration (Yandex + iCloud)
-- **dateparser + natasha** - Fallback NLP if LLM unavailable
+## Quick Start
+
+```bash
+# First time setup
+make setup              # Install deps, start PostgreSQL, run migrations
+
+# Generate encryption key (required for .env)
+uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Configure .env then run
+make run                # Starts Docker, migrations, then bot
+```
+
+## Essential Commands
+
+| Command | Purpose |
+|---------|---------|
+| `make run` | Full startup (Docker → migrations → bot) |
+| `make test` | Run all tests (smoke + integration if Docker available) |
+| `make migrate-create` | Create new Alembic migration |
+| `make init` | Seed admin user from ADMIN_USER_ID env var |
 
 ## Architecture
+
 ```
 src/
-├── api/                   # Telegram bot handlers
-│   └── telegram_handlers.py
-├── managers/              # Business logic
-│   ├── whitelist_manager.py
-│   └── calendar_manager.py
-├── dao/                   # Data Access Objects (PostgreSQL)
-│   ├── user_repository.py
-│   ├── calendar_repository.py
-│   └── event_repository.py
-├── models/                # Pydantic and SQLAlchemy models
-│   ├── config.py
-│   ├── domain.py
-│   └── database_models.py
-├── services/              # External service integrations
-│   ├── calendar/          # CalDAV clients
-│   └── llm_service.py
-└── utils/                 # Encryption, datetime utilities
-    ├── encryption.py
-    └── datetime_utils.py
-
-main.py                    # Entry point
-docker-compose.yml         # PostgreSQL container
-Makefile                   # Build and deployment commands
-migrations/                # Alembic database migrations
+api/telegram_handlers.py    # aiogram handlers with whitelist middleware
+managers/                    # Business logic layer
+  whitelist_manager.py      # Access control (is_user_whitelisted, add/remove)
+  calendar_manager.py       # Gets encrypted credentials from DB
+  event_logger.py           # Audit logging with user attribution
+dao/database.py             # SQLAlchemy engine + session factory
+models/
+  config.py                 # Pydantic-settings from .env
+  database_models.py        # SQLAlchemy: WhitelistUser, CalendarConfig, EventLog
+  domain.py                 # Pydantic: ParsedEvent
+services/
+  calendar/yandex.py        # CalDAV client with dynamic credentials
+  calendar/icloud.py        # Same interface, different URL
+  llm_service.py            # OpenRouter with structured output
+utils/encryption.py         # Fernet encryption for calendar passwords
 ```
 
-## Key Decisions
-- **Whitelist-based access**: Only users in whitelist can use the bot
-- **Single shared calendar**: One calendar per service, shared among whitelisted users
-- **Admin-controlled**: Admin manages whitelist via Telegram commands
-- **Encrypted credentials**: Calendar passwords encrypted in PostgreSQL
-- **Event logging**: All created events logged with user attribution
-- **PostgreSQL**: Persistent storage for whitelist and configuration
-- **uv + Makefile**: Modern Python workflow with simple commands
-- **LLM first, natasha fallback**: Try OpenRouter first, fall back to natasha if unavailable
+## Key Workflows
 
-## Environment Variables (.env)
+### Adding a New User
+1. Admin runs `/add_user <telegram_id>` in Telegram
+2. User must then send `/start` to activate
+
+### Database Changes
+```bash
+# After modifying models
+cd /home/vagrant/code/calemdar-agent && uv run alembic revision --autogenerate -m "description"
+uv run alembic upgrade head
 ```
-TELEGRAM_BOT_TOKEN=
-ADMIN_USER_ID=          # First admin, can add other users
-OPENROUTER_API_KEY=
-OPENROUTER_MODEL=openai/gpt-3.5-turbo
-DATABASE_URL=postgresql+psycopg://bot_user:password@localhost:5432/calendar_bot
-ENCRYPTION_KEY=         # Key for encrypting calendar passwords
-DEFAULT_CALENDAR=yandex
+
+### Testing
+- **Smoke tests** (`tests/test_basic.py`): Always run, no Docker needed
+- **Integration tests** (`tests/integration/`): Require Docker; auto-skip if unavailable
+- Use `testcontainers` for DB-dependent tests
+
+## Environment Variables (Required)
+
+```bash
+TELEGRAM_BOT_TOKEN=       # From @BotFather
+ADMIN_USER_ID=            # First admin Telegram ID
+DATABASE_URL=             # postgresql+psycopg://bot_user:password@localhost:5432/calendar_bot
+ENCRYPTION_KEY=           # Fernet key (generate with code above)
+OPENROUTER_API_KEY=       # For LLM parsing
+DEFAULT_CALENDAR=yandex   # yandex or icloud
 TIMEZONE=Europe/Moscow
 ```
 
-## Admin Commands
-- `/add_user <telegram_id>` - Add user to whitelist
-- `/remove_user <telegram_id>` - Remove user from whitelist  
-- `/list_users` - Show all whitelisted users
+## Quirks
 
-## User Commands
-- `/start` - Check access and initialize
-- `/stats` - Show my event statistics
+- **Credentials storage**: Calendar passwords stored encrypted in PostgreSQL; configure via `scripts/init_admin.py` or direct DB insert
+- **No deletion via bot**: Events can only be deleted manually in calendar app
+- **Single shared calendar**: All users add to the same calendar (configured in DB)
+- **LLM parsing**: OpenRouter GPT-3.5-turbo; natasha as fallback commented out
 
 ## Database Schema
+
 ```sql
-whitelist_users (telegram_id PK, username, role, added_at, is_active)
-calendar_config (id, calendar_type, username, encrypted_password, is_active)
-event_log (id, telegram_user_id, event_title, event_date, created_at)
+whitelist_users(telegram_id PK, role, is_active, added_by_telegram_id)
+calendar_config(id, calendar_type, username, encrypted_password, is_active, is_default)
+event_log(id, telegram_user_id, event_title, event_date, calendar_type, created_at)
 ```
-
-## Setup Workflow
-```bash
-# 1. Setup environment
-make setup              # Start PostgreSQL and run migrations
-
-# 2. Add first user (admin)
-make run
-# Then: /add_user <admin_telegram_id>
-
-# 3. Add calendar credentials
-# Configure via admin commands or direct DB insert
-```
-
-## Calendar Integration
-- Both Yandex and iCloud use **CalDAV** protocol
-- Yandex URL: `https://caldav.yandex.ru`
-- iCloud URL: `https://caldav.icloud.com`
-- Use app-specific passwords, not account passwords
-- Credentials encrypted with Fernet before storage
-
-## Security
-- Whitelist check on every message
-- Calendar passwords encrypted in database
-- Admin-only user management
-- Event logging for audit trail
-- No deletion permissions through bot (manual only)
